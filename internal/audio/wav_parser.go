@@ -27,12 +27,12 @@ func ParseWav(path string) (WavType, error) {
 
 	fmt.Printf("\n")
 
-	var data_info WavDataChunk
-	err = data_info.FindDataChunk(f)
+	var dataInfo WavDataChunk
+	err = dataInfo.FindDataChunk(f)
 	if err != nil {
 		log.Fatal(err)
 	}
-	data_info.logDataChunk()
+	dataInfo.logDataChunk()
 
-	return WavType{header, data_info}, nil
+	return WavType{header, dataInfo}, nil
 }
