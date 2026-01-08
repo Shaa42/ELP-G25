@@ -1,59 +1,61 @@
-// Server boilerplate
-
+// Server: receive WavData via gob and reply with per-chunk ACK
 package main
 
 import (
-	"bufio"
+	"encoding/gob"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"strings"
+
+	"elp-project/internal/audio"
 )
 
 func handleConn(conn net.Conn) {
 	defer conn.Close()
-	fmt.Println("New connection.")
+	log.Println("Server: new connection from", conn.RemoteAddr())
+
+	dec := gob.NewDecoder(conn)
+	enc := gob.NewEncoder(conn)
 
 	for {
-		// New message buffer
-		var readBuffer *bufio.Reader = bufio.NewReader(conn)
-		message, err := readBuffer.ReadString('\n')
-		if err != nil {
+		var wd audio.WavData
+		if err := dec.Decode(&wd); err != nil {
 			if err == io.EOF {
-				fmt.Println("Client closed the connection.")
-				break
-			} else {
-				log.Fatal("Couldn't read string: ", err)
+				log.Println("Server: client closed connection", conn.RemoteAddr())
+				return
 			}
+			log.Println("Server: gob decode error:", err)
+			return
 		}
 
-		message = strings.TrimSpace(message)
+		ack := fmt.Sprintf("ACK Chunk %d", wd.ChunkID)
+		if err := enc.Encode(ack); err != nil {
+			log.Println("Server: gob encode ACK error:", err)
+			return
+		}
 
-		log.Println(">>", message)
+		log.Printf("Server: processed WavData (Samples=%d, SR=%d, Ch=%d, Bits=%d) -> %q\n",
+			len(wd.Samples), wd.Metadata.SampleRate, wd.Metadata.Channels, wd.Metadata.Bitdepth, ack)
 	}
 }
 
 func main() {
-	// Open a TCP listening port
-	fmt.Println("This is the main code for the server")
-	listener, err := net.Listen("tcp", ":42069")
-	if err != nil {
-		log.Fatal("Couldn't open listening port.", err)
-	}
+	addr := ":42069"
+	log.Println("Server: listening on", addr)
 
-	// Make sure the listening port is closed after the code execution
-	defer listener.Close()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatal("Server: failed to listen:", err)
+	}
+	defer ln.Close()
 
 	for {
-		// Accept incoming connexions
-		conn, err := listener.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
-			log.Println("Couldn't accept connexion :", err)
+			log.Println("Server: accept error:", err)
 			continue
 		}
-
 		go handleConn(conn)
 	}
-
 }
