@@ -1,33 +1,31 @@
 package main
 
 import (
-	"encoding/binary"
 	"encoding/gob"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"os"
+	"sync"
 
 	"elp-project/internal/audio"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <wav_path> [server_addr]\n", os.Args[0])
-		os.Exit(1)
-	}
-	wavPath := os.Args[1]
+	wavPath := "assets/sine_8k.wav"
 	addr := "localhost:42069"
-	if len(os.Args) >= 3 {
-		addr = os.Args[2]
-	}
 
 	// Construire WavData à partir du fichier WAV
-	wd, err := buildWavData(wavPath)
+	wt, wd, err := audio.ParseWav(wavPath)
 	if err != nil {
-		log.Fatalf("failed to build WavData: %v", err)
+		log.Printf("failed to build WavData: %v", err)
+		panic(err)
 	}
+	defer wd.Close()
+
+	wt.Log()
+
+	chunkSize := 4096
+	totalChunks := (wd.TotalFrames + chunkSize - 1) / chunkSize
 
 	// Connexion au serveur
 	conn, err := net.Dial("tcp", addr)
@@ -36,81 +34,63 @@ func main() {
 	}
 	defer conn.Close()
 
+	// Chunks chan
+	serverChunks := make(chan audio.WavDataChunk, totalChunks)
+
+	// Waitgroup
+	var wg sync.WaitGroup
+
 	// Envoyer WavData en plusieurs chunks via gob et lire un ACK pour chaque chunk
 	enc := gob.NewEncoder(conn)
 	dec := gob.NewDecoder(conn)
 
-	frameSize := int(wd.Metadata.Channels) * int(wd.Metadata.Bitdepth/8)
-	if frameSize <= 0 {
-		log.Fatalf("invalid frame size computed from metadata: channels=%d bitdepth=%d", wd.Metadata.Channels, wd.Metadata.Bitdepth)
-	}
-	totalFrames := len(wd.Samples) / frameSize
-	chunkFrames := 2048
-	chunkID := 0
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(serverChunks)
 
-	for startFrame := 0; startFrame < totalFrames; startFrame += chunkFrames {
-		endFrame := min(startFrame+chunkFrames, totalFrames)
+		for range totalChunks {
+			var chunk audio.WavDataChunk
+			if err := dec.Decode(&chunk); err != nil {
+				log.Printf("Erreur réception chunk: %v", err)
+				break
+			}
+			fmt.Printf("Reçu chunk #%d (%d bytes)\n", chunk.ChunkID, len(chunk.Samples))
+			serverChunks <- chunk
+		}
+		fmt.Println("Réception terminée")
+	}()
 
-		startByte := startFrame * frameSize
-		endByte := endFrame * frameSize
+	// Iter through data until EOF
+	for {
+		chunk, eof := wd.Advance(chunkSize)
+		if len(chunk) > 0 {
+			wdc := audio.WavDataChunk{
+				Metadata: wd.Metadata,
+				ChunkID:  wd.ChunkID,
+				Samples:  chunk,
+			}
+			// fmt.Printf("Chunk #%d: %d bytes\n", wd.ChunkID, wdc.Len())
 
-		msg := audio.WavData{
-			Metadata: wd.Metadata,
-			Samples:  wd.Samples[startByte:endByte],
-			ChunkID:  chunkID,
+			// Encode Struct to send to server
+			if err := enc.Encode(wdc); err != nil {
+				log.Fatalf("failed to gob-encode WavData chunk %d: %v", wd.ChunkID, err)
+			}
+
+			// Get server ACK message
+			// var ack string
+			// if err := dec.Decode(&ack); err != nil {
+			// 	log.Fatalf("failed to gob-decode ACK for chunk %d: %v", wd.ChunkID, err)
+			// }
+			// fmt.Println("Client: reçu:", ack)
+
+			// fmt.Printf("Client: envoyé %d chunks (%d frames au total) au serveur %s\n", wd.ChunkID, wd.TotalFrames, addr)
 		}
 
-		if err := enc.Encode(msg); err != nil {
-			log.Fatalf("failed to gob-encode WavData chunk %d: %v", chunkID, err)
+		if eof {
+			fmt.Println("EOF")
+			break
 		}
-
-		var ack string
-		if err := dec.Decode(&ack); err != nil {
-			log.Fatalf("failed to gob-decode ACK for chunk %d: %v", chunkID, err)
-		}
-		fmt.Println("Client: reçu:", ack)
-
-		chunkID++
 	}
-
-	fmt.Printf("Client: envoyé %d chunks (%d frames au total) au serveur %s\n", chunkID, totalFrames, addr)
-}
-
-func buildWavData(path string) (audio.WavData, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return audio.WavData{}, fmt.Errorf("open: %w", err)
-	}
-	defer f.Close()
-
-	// Lire l'entête WAV (même struct que côté package audio)
-	var header audio.WavHeader
-	if err := binary.Read(f, binary.LittleEndian, &header); err != nil {
-		return audio.WavData{}, fmt.Errorf("read header: %w", err)
-	}
-
-	// Atteindre le chunk data
-	var dataInfo audio.WavDataChunk
-	if err := dataInfo.FindDataChunk(f); err != nil {
-		return audio.WavData{}, fmt.Errorf("find data chunk: %w", err)
-	}
-
-	// Lire les samples bruts
-	samples := make([]byte, dataInfo.DataSize)
-	if _, err := io.ReadFull(f, samples); err != nil {
-		return audio.WavData{}, fmt.Errorf("read samples: %w", err)
-	}
-
-	// Construire WavData
-	wd := audio.WavData{
-		Metadata: audio.WavMetadata{
-			SampleRate: header.Frequency,
-			Channels:   header.NbrChannels,
-			Bitdepth:   header.BitsPerSample,
-			Format:     header.AudioFormat,
-		},
-		Samples: samples,
-		ChunkID: 0,
-	}
-	return wd, nil
+	wg.Wait()
 }

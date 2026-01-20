@@ -4,55 +4,62 @@ package audio
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 	"os"
 )
 
-func ParseWav(path string) (WavType, WavData, error) {
+func ParseWav(path string) (WavType, *WavData, error) {
 	// Open WAV file
 	f, err := os.Open(path)
 	if err != nil {
-		panic(err)
+		return WavType{}, nil, err
 	}
-	defer f.Close()
 
 	// Get RIFF chunk + chunk describing data format
-	var header WavHeader
+	var header WavHeaderInfo
 	err = binary.Read(f, binary.LittleEndian, &header)
 	if err != nil {
-		return WavType{}, WavData{}, err
+		f.Close()
+		return WavType{}, nil, err
 	}
-	header.logHeader()
+	// header.logHeader()
 
-	fmt.Printf("\n")
+	// fmt.Printf("\n")
 
 	// Get to data chunk
-	var dataInfo WavDataChunk
+	var dataInfo WavDataInfo
 	err = dataInfo.FindDataChunk(f)
 	if err != nil {
-		return WavType{}, WavData{}, err
+		f.Close()
+		return WavType{}, nil, err
 	}
-	dataInfo.logDataChunk()
+	// dataInfo.logDataChunk()
 
-	// Read audio samples
-	samples := make([]byte, dataInfo.DataSize)
-	_, err = io.ReadFull(f, samples)
+	// Keep in memory audio data cursor initial position
+	dataOffset, err := f.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return WavType{}, WavData{}, err
+		f.Close()
+		return WavType{}, nil, err
 	}
+
+	// Compute frame size and total frames number
+	frameSize := int(header.NbrChannels) * int(header.BitsPerSample/8)
+	totalFrames := int(dataInfo.DataSize) / frameSize
 
 	// Build WavData with metadata & cursor
-	wd := WavData{
+	wd := &WavData{
 		Metadata: WavMetadata{
 			SampleRate: header.Frequency,
 			Channels:   header.NbrChannels,
 			Bitdepth:   header.BitsPerSample,
 			Format:     header.AudioFormat,
 		},
-		Samples:       samples,
+		File:          f,
+		DataOffset:    dataOffset,
+		DataSize:      dataInfo.DataSize,
 		ChunkID:       0,
-		cursorSamples: 0,
+		CursorSamples: 0,
+		TotalFrames:   totalFrames,
 	}
 
 	return WavType{header, dataInfo}, wd, nil
