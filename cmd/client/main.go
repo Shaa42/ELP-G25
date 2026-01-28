@@ -105,6 +105,6 @@ func main() {
 			count, totalChunks)
 	}
 
-	fmt.Println("Creating new file in", "assets/test.wav")
-	audio.WriteWav("assets/test.wav", receivedChunks)
+	fmt.Println("Creating new file in", "assets/output.wav")
+	audio.WriteWav("assets/output.wav", receivedChunks)
 }
